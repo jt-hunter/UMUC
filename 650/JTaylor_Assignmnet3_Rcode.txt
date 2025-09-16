@@ -1,0 +1,249 @@
+library(ibmdbR)
+
+# data to access IBM Db2
+dsn_driver <- c("BLUDB")
+dsn_database <- c("BLUDB")
+dsn_hostname <- c("dashdb-txn-sbox-yp-dal09-04.services.dal.bluemix.net")
+dsn_port <- "50000"
+dsn_protocol <- "TCPIP"
+dsn_uid <- c("pbx29064")
+dsn_pwd <- c("qhfh-rb3qtjv32qs")
+
+conn_path <- paste(dsn_driver,  
+                   ";DATABASE=",dsn_database,
+                   ";HOSTNAME=",dsn_hostname,
+                   ";PORT=",dsn_port,
+                   ";PROTOCOL=",dsn_protocol,
+                   ";UID=",dsn_uid,
+                   ";PWD=",dsn_pwd,sep="")
+mycon <- idaConnect(conn_path) 
+idaInit(mycon)
+
+#Read the data from database
+SENTIMENT <- idaQuery("SELECT * from GOP_SENTIMENT")
+
+#Check the row counts
+nrow(SENTIMENT)
+idadf(mycon, "SELECT count(*) FROM GOP_SENTIMENT")
+
+#Candidate counts
+table(SENTIMENT$CANDIDATE)
+
+#Sentiment counts
+table(SENTIMENT$SENTIMENT)
+
+# Candidates and their sentiment counts
+table(SENTIMENT$CANDIDATE, SENTIMENT$SENTIMENT)
+
+#Candidate mentioned and Subject count
+table(SENTIMENT$CANDIDATE, SENTIMENT$SUBJECT_MATTER)
+
+# Piechart on subjects
+pie(table(SENTIMENT$SUBJECT_MATTER), radius = 1, cex = 0.6)
+
+##########################
+
+#Apriori rules method
+dfa<-SENTIMENT[ , c('CANDIDATE', 'SENTIMENT',  'SUBJECT_MATTER',  'RETWEET_COUNT')]
+dfa$CANDIDATE<-as.factor(dfa$CANDIDATE)
+dfa$SENTIMENT<-as.factor(dfa$SENTIMENT)
+dfa$SUBJECT_MATTER<-as.factor(dfa$SUBJECT_MATTER)
+
+# binning the retweet counts into 10 bins
+dfa$RETWEET_COUNT<-cut(dfa$RETWEET_COUNT, breaks=c(0,1,2,3,4,5,6,7,8,9), right=F)
+
+rules<-apriori(dfa)
+arules::inspect(rules[])
+
+#####################
+
+#Text Mining
+#install SnowballC for stemming.  Do it only once.
+install.packages("SnowballC")
+
+#Load the packages in memory
+library("tm")
+library("wordcloud")
+library ("SnowballC")
+
+#Load the tweets with positive sentiment into the data frame positive
+positivetxt <- idadf(mycon, "SELECT 
+                  TEXT FROM GOP_SENTIMENT 
+                  WHERE GOP_SENTIMENT.SENTIMENT='Positive'")
+neutraltxt <- idadf(mycon, "SELECT 
+                  TEXT FROM GOP_SENTIMENT 
+                  WHERE GOP_SENTIMENT.SENTIMENT='Neutral'")
+negativetxt <- idadf(mycon, "SELECT 
+                  TEXT FROM GOP_SENTIMENT 
+                  WHERE GOP_SENTIMENT.SENTIMENT='Negative'")
+
+
+# convert to document
+docpos<-VectorSource(positivetxt$TEXT)
+docneu<-VectorSource(neutraltxt$TEXT)
+docneg<-VectorSource(negativetxt$TEXT)
+
+# corpus so tm package can work
+docpos<-Corpus(docpos)
+docneg<-Corpus(docneg)
+
+#Strip the white space
+docpos <- tm_map(docpos, stripWhitespace)
+docneg <- tm_map(docneg, stripWhitespace)
+
+#Remove the URLs
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x)
+docpos <- tm_map(docpos, content_transformer(removeURL))
+docneg <- tm_map(docneg, content_transformer(removeURL))
+
+#Remove non ASCII character
+removeInvalid<-function(x) gsub("[^\x01-\x7F]", "", x)
+docpos <- tm_map(docpos, content_transformer(removeInvalid))
+docneg <- tm_map(docneg, content_transformer(removeInvalid))
+
+#Remove punctuation
+docpos <- tm_map(docpos, removePunctuation)
+docneg <- tm_map(docneg, removePunctuation)
+
+#remove the numbers and lower case
+docpos <- tm_map(docpos, removeNumbers)
+docpos <- tm_map(docpos, tolower)
+docneg <- tm_map(docneg, removeNumbers)
+docneg <- tm_map(docneg, tolower)
+
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+docpos <- tm_map(docpos, toSpace, "@")   #Remove @
+docpos <- tm_map(docpos, toSpace, "/")   #Remove /
+docpos <- tm_map(docpos, toSpace, "\\|") #Remove |
+docneg <- tm_map(docneg, toSpace, "@")   #Remove @
+docneg <- tm_map(docneg, toSpace, "/")   #Remove /
+docneg <- tm_map(docneg, toSpace, "\\|") #Remove |
+
+
+#Remove the stop word
+docpos <- tm_map(docpos, removeWords, stopwords("english"))
+docpos <- tm_map(docpos, removeWords, stopwords("SMART"))
+docneg <- tm_map(docneg, removeWords, stopwords("english"))
+docneg <- tm_map(docneg, removeWords, stopwords("SMART"))
+
+# reduce words to their stem
+docpos <- tm_map(docpos, stemDocument)
+docneg <- tm_map(docneg, stemDocument)
+
+
+#Remove the white space introduced during the pre-processing
+docpos <- tm_map(docpos, stripWhitespace)
+docneg <- tm_map(docneg, stripWhitespace)
+
+# create document term matrix
+dtmpos <- DocumentTermMatrix(docpos)
+dtmneg <- DocumentTermMatrix(docneg)
+
+#Convert dtm to a matrix
+mpos <- as.matrix(dtmpos)   
+mneg <- as.matrix(dtmneg)
+
+dtmspos <- removeSparseTerms(dtmpos, 0.6) # Prepare the data (max 60% empty space)
+dtmsneg <- removeSparseTerms(dtmneg, 0.6) # Prepare the data (max 60% empty space)   
+
+freqpos <- colSums(as.matrix(dtmpos)) # Find word frequencies   
+freqneg <- colSums(as.matrix(dtmneg)) # Find word frequencies   
+
+#order by frequency
+freqpos <- sort(freqpos, decreasing=TRUE)
+freqneg <- sort(freqneg, decreasing=TRUE)
+
+
+dark2 <- brewer.pal(6, "Dark2")
+
+#NOTE ON WORDCLOUD
+#RStudio will return different wordclouds based on the size of the plot viewer
+#if the window is too small it will not produce graphs that look like mine in the assignment
+#it will remove words that have high word counts if too small
+
+
+#negative
+wordcloud(names(freqneg), freqneg, min.freq=10, max.words=100, colors=dark2, random.order=FALSE, random.color=FALSE)  
+
+#positive
+wordcloud(names(freqpos), freqpos, min.freq=10, max.words=100, colors=dark2, random.order=FALSE, random.color=FALSE)  
+
+##################################################################
+
+# Terms Cluster dendogram
+library("cluster")
+
+dend_pos <- removeSparseTerms(dtmpos, 0.98)    #Remove sparse terms
+dend_neg <- removeSparseTerms(dtmneg, 0.98)
+
+#positive
+d_pos <- dist(t(dend_pos), method="euclidian")  #Build the dissimilarity matrix
+fit_pos <- hclust(d=d_pos, method="ward.D2")
+plot(fit_pos, hang=-1)
+
+#negative
+d_neg <- dist(t(dend_neg), method="euclidian")  #Build the dissimilarity matrix
+fit_neg <- hclust(d=d_neg, method="ward.D2")
+plot(fit_neg, hang=-1)
+
+############################################################
+# Womens issues
+
+#preprocessing to clean the words
+#subset from initial dataframe
+negwomenissuedf <- subset(SENTIMENT, SENTIMENT=='NEGATIVE' | SUBJECT_MATTER=="Women's Issues (not abortion though)")
+
+#only the text
+negwomenissue <- negwomenissuedf$TEXT
+
+#covert to utf-8 so it can be put into vector than corpus for tm to work
+negwomenissue <-  iconv(negwomenissue, to ="utf-8")
+negwomenissue <- Corpus(VectorSource(negwomenissue))
+
+#Strip the white space
+womenneg <- tm_map(negwomenissue, stripWhitespace)
+
+#Remove the URLs
+womenneg <- tm_map(womenneg, content_transformer(removeURL))
+
+
+#Remove non ASCII character
+womenneg <- tm_map(womenneg, content_transformer(removeInvalid))
+
+
+#Remove punctuation
+womenneg <- tm_map(womenneg, removePunctuation)
+
+
+#remove the numbers
+womenneg <- tm_map(womenneg, removeNumbers)
+womenneg <- tm_map(womenneg, tolower)
+
+#remove symbols
+womenneg <- tm_map(womenneg, toSpace, "@")   #Remove @
+womenneg <- tm_map(womenneg, toSpace, "/")   #Remove /
+womenneg <- tm_map(womenneg, toSpace, "\\|") #Remove |
+
+
+#Remove the stop word
+womenneg <- tm_map(womenneg, removeWords, stopwords("english"))
+womenneg <- tm_map(womenneg, removeWords, stopwords("SMART"))
+
+#reduce words to their stem
+womenneg <- tm_map(womenneg, stemDocument)
+
+#Remove the white space introduced during the pre-processing
+womenneg <- tm_map(womenneg, stripWhitespace)
+
+#create term matrix
+dtmwom <- DocumentTermMatrix(womenneg)
+
+#sum columns to get word counts
+freqwom <- colSums(as.matrix(dtmwom)) # Find word frequencies   
+
+#sort by frequency
+freqwom <- sort(freqwom, decreasing=TRUE)
+freqwom
+
+#put in df to extract more easily
+freqwom1 <- data.frame(as.list(freqwom))
